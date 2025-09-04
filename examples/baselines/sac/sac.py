@@ -27,7 +27,7 @@ import mani_skill.envs
 
 @dataclass
 class Args:
-    exp_name: Optional[str] = None
+    exp_name: Optional[str] = "So100"
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -45,7 +45,7 @@ class Args:
     """the group of the run for wandb"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_trajectory: bool = False
+    save_trajectory: bool = True
     """whether to save trajectory data into the `videos` folder"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
@@ -59,11 +59,13 @@ class Args:
     # Environment specific arguments
     env_id: str = "PickCube-v1"
     """the id of the environment"""
+    robot: str = "so100"
+    """the robot to use in the environment. If None, use the default robot of the environment (panda | so100)"""
     env_vectorization: str = "gpu"
-    """the type of environment vectorization to use"""
-    num_envs: int = 16
+    """the type of environment vectorization to use (gpu | cpu)"""
+    num_envs: int = 4
     """the number of parallel environments"""
-    num_eval_envs: int = 16
+    num_eval_envs: int = 4
     """the number of parallel evaluation environments"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -89,7 +91,7 @@ class Args:
     """total timesteps of the experiments"""
     buffer_size: int = 1_000_000
     """the replay memory buffer size"""
-    buffer_device: str = "cuda"
+    buffer_device: str = "cpu"
     """where the replay buffer is stored. Can be 'cpu' or 'cuda' for GPU"""
     gamma: float = 0.8
     """the discount factor gamma"""
@@ -274,6 +276,8 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     args.grad_steps_per_iteration = int(args.training_freq * args.utd)
     args.steps_per_env = args.training_freq // args.num_envs
+    if args.steps_per_env == 0:
+        args.steps_per_env = 1
     if args.exp_name is None:
         args.exp_name = os.path.basename(__file__)[: -len(".py")]
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -289,11 +293,24 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     ####### Environment setup #######
-    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="gpu")
+    if args.robot is None:
+        env_kwargs = dict(
+            obs_mode="state",
+            render_mode="rgb_array",
+            sim_backend=args.env_vectorization,
+        )
+    else:
+        env_kwargs = dict(
+            obs_mode="state",
+            render_mode="rgb_array",
+            sim_backend="gpu",
+            robot_uids=args.robot,
+        )
+    # env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="gpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
-    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
-    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="default"), **env_kwargs)
+    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, human_render_camera_configs=dict(shader_pack="minimal"), **env_kwargs)
+    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="minimal"), **env_kwargs)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)

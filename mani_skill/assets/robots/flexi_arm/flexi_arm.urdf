@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Seems like name doesnt matter just the robot tag -->
+<robot name="flexi_arm">
+
+  <!-- =============================== MATERIALS =============================== -->
+  <material name="Flexi/Purple">
+    <color rgba="0.6 0.2 0.8 1"/>
+  </material>
+  <material name="Flexi/Gold">
+    <color rgba="0.8 0.6 0.2 1"/>
+  </material>
+  <material name="Flexi/Green">
+    <color rgba="0.2 0.8 0.4 1"/>
+  </material>
+
+  <!-- ============================ BASE ============================= -->
+  <link name="Base">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.08"/>
+      <geometry>
+        <cylinder length="0.16" radius="0.1"/>
+      </geometry>
+      <material name="Flexi/Purple"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.08"/>
+      <geometry>
+        <cylinder length="0.16" radius="0.1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="8.0"/>
+      <origin rpy="0 0 0" xyz="0 0 0.08"/>
+      <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.025"/>
+    </inertial>
+  </link>
+
+  <!-- ========================= 1. BASE ROTATION ========================= -->
+  <joint name="Base_Rotation" type="revolute">
+    <parent link="Base"/>
+    <child link="Shoulder_Yaw"/>
+    <origin rpy="0 0 0" xyz="0 0 0.16"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="100" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+
+  <link name="Shoulder_Yaw">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.04"/>
+      <geometry>
+        <cylinder length="0.08" radius="0.05"/>
+      </geometry>
+      <material name="Flexi/Gold"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.04"/>
+      <geometry>
+        <cylinder length="0.08" radius="0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.8"/>
+      <origin rpy="0 0 0" xyz="0 0 0.04"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.003" iyz="0" izz="0.003"/>
+    </inertial>
+  </link>
+
+  <!-- ======================== 2. SHOULDER PITCH ========================= -->
+  <joint name="Shoulder_Pitch" type="revolute">
+    <parent link="Shoulder_Yaw"/>
+    <child link="Shoulder_Roll"/>
+    <origin rpy="0 0 0" xyz="0 0 0.08"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="80" lower="-0.2" upper="0.2" velocity="1.2"/>
+  </joint>
+
+  <link name="Shoulder_Roll">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.03"/>
+      <geometry>
+        <cylinder length="0.06" radius="0.04"/>
+      </geometry>
+      <material name="Flexi/Green"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.03"/>
+      <geometry>
+        <cylinder length="0.06" radius="0.04"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.6"/>
+      <origin rpy="0 0 0" xyz="0 0 0.03"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002"/>
+    </inertial>
+  </link>
+
+  <!-- ======================== 3. SHOULDER ROLL ========================= -->
+  <joint name="Shoulder_Roll_Joint" type="revolute">
+    <parent link="Shoulder_Roll_Joint"/>
+    <child link="Upper_Arm"/>
+    <origin rpy="0 0 0" xyz="0 0 0.06"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="60" lower="-0.1" upper="0.1" velocity="1.5"/>
+  </joint>
+
+  <link name="Upper_Arm">
+    <visual>
+      <origin rpy="0 0 0" xyz="0.18 0 0"/>
+      <geometry>
+        <box size="0.36 0.06 0.06"/>
+      </geometry>
+      <material name="Flexi/Purple"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.18 0 0"/>
+      <geometry>
+        <box size="0.36 0.06 0.06"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="2.0"/>
+      <origin rpy="0 0 0" xyz="0.18 0 0"/>
+      <inertia ixx="0.004" ixy="0" ixz="0" iyy="0.025" iyz="0" izz="0.025"/>
+    </inertial>
+  </link>
+
+  <!-- ========================== 4. ELBOW PITCH =========================== -->
+  <joint name="Elbow_Pitch" type="revolute">
+    <parent link="Upper_Arm"/>
+    <child link="Elbow_Yaw"/>
+    <origin rpy="0 0 0" xyz="0.36 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="50" lower="-0.8" upper="0.8" velocity="1.8"/>
+  </joint>
+
+  <link name="Elbow_Yaw">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.025"/>
+      <geometry>
+        <cylinder length="0.05" radius="0.035"/>
+      </geometry>
+      <material name="Flexi/Gold"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.025"/>
+      <geometry>
+        <cylinder length="0.05" radius="0.035"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.4"/>
+      <origin rpy="0 0 0" xyz="0 0 0.025"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- ========================== 5. ELBOW YAW =========================== -->
+  <joint name="Elbow_Yaw" type="revolute">
+    <parent link="Elbow_Yaw"/>
+    <child link="Lower_Arm"/>
+    <origin rpy="0 0 0" xyz="0 0 0.05"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="40" lower="-0.1" upper="0.1" velocity="2.0"/>
+  </joint>
+
+  <link name="Lower_Arm">
+    <visual>
+      <origin rpy="0 0 0" xyz="0.14 0 0"/>
+      <geometry>
+        <box size="0.28 0.05 0.05"/>
+      </geometry>
+      <material name="Flexi/Green"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.14 0 0"/>
+      <geometry>
+        <box size="0.28 0.05 0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.2"/>
+      <origin rpy="0 0 0" xyz="0.14 0 0"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.012" iyz="0" izz="0.012"/>
+    </inertial>
+  </link>
+
+  <!-- ======================== 6. WRIST PITCH ======================== -->
+  <joint name="Wrist_Pitch" type="revolute">
+    <parent link="Lower_Arm"/>
+    <child link="Wrist_Roll"/>
+    <origin rpy="0 0 0" xyz="0.28 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="30" lower="-0.5" upper="0.5" velocity="2.5"/>
+  </joint>
+
+  <link name="Wrist_Roll">
+    <visual>
+      <origin rpy="0 0 0" xyz="0.02 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.025"/>
+      </geometry>
+      <material name="Flexi/Purple"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.02 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.025"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.3"/>
+      <origin rpy="0 0 0" xyz="0.02 0 0"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0008"/>
+    </inertial>
+  </link>
+
+  <!-- ======================== 7. WRIST ROLL ======================== -->
+  <joint name="Wrist_Roll" type="revolute">
+    <parent link="Wrist_Roll"/>
+    <child link="Fixed_Jaw"/>
+    <origin rpy="0 0 0" xyz="0.04 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="20" lower="-0.5" upper="0.5" velocity="3.0"/>
+  </joint>
+
+  <!-- FIXED: Better positioned fixed jaw -->
+  <link name="Fixed_Jaw">
+    <visual>
+      <origin rpy="0 0 0" xyz="0.04 0 -0.04"/>
+      <geometry>
+        <box size="0.08 0.02 0.02"/>
+      </geometry>
+      <material name="Flexi/Gold"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.04 0 -0.04"/>
+      <geometry>
+        <box size="0.08 0.02 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin rpy="0 0 0" xyz="0.04 0 -0.04"/>
+      <inertia ixx="3e-4" ixy="0" ixz="0" iyy="3e-4" iyz="0" izz="3e-4"/>
+    </inertial>
+  </link>
+
+  <!-- ======================= 8. GRIPPER - FIXED ======================== -->
+  <joint name="Jaw" type="revolute">
+    <parent link="Fixed_Jaw"/>
+    <child link="Moving_Jaw"/>
+    <!-- Set to 0.035 m so neutral jaw-tip gap = 0.055 m -->
+    <origin rpy="0 -0.12 0" xyz="0 0 0.055"/>
+    <axis xyz="0 -1 0"/>
+    <limit effort="25" lower="-0.12" upper="0.36" velocity="0.5"/>
+  </joint>
+
+  <link name="Moving_Jaw">
+    <visual>
+      <origin rpy="0 0 0" xyz="0.04 0 0"/>
+      <geometry>
+        <box size="0.08 0.02 0.02"/>
+      </geometry>
+      <material name="Flexi/Gold"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.04 0 0"/>
+      <geometry>
+        <box size="0.08 0.02 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin rpy="0 0 0" xyz="0.04 0 0"/>
+      <inertia ixx="3e-4" ixy="0" ixz="0" iyy="3e-4" iyz="0" izz="3e-4"/>
+    </inertial>
+  </link>
+
+  <!-- ======================= GRIPPER TIP LINKS - FIXED ======================== -->
+  <joint name="Fixed_Jaw_tip_joint" type="fixed">
+    <parent link="Fixed_Jaw"/>
+    <child link="Fixed_Jaw_tip"/>
+    <!-- Tip at the inner edge where contact occurs -->
+    <origin rpy="0 0 0" xyz="0.08 0 -0.03"/>
+  </joint>
+
+  <link name="Fixed_Jaw_tip">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+      <material name="Flexi/Green"/>
+    </visual>
+  </link>
+
+  <joint name="Moving_Jaw_tip_joint" type="fixed">
+    <parent link="Moving_Jaw"/>
+    <child link="Moving_Jaw_tip"/>
+    <!-- Tip at the inner edge where contact occurs -->
+    <origin rpy="0 0 0" xyz="0.08 0 -0.01"/>
+  </joint>
+
+  <link name="Moving_Jaw_tip">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+      <material name="Flexi/Green"/>
+    </visual>
+  </link>
+
+</robot>

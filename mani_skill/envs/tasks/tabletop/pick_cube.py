@@ -40,6 +40,8 @@ class PickCubeEnv(BaseEnv):
         "xarm6_robotiq",
         "so100",
         "widowxai",
+        "compact_arm",
+        "flexi_arm",
     ]
     agent: Union[Panda, Fetch, XArm6Robotiq, SO100, WidowXAI]
     goal_thresh = 0.025
