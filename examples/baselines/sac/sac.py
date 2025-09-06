@@ -27,7 +27,7 @@ import mani_skill.envs
 
 @dataclass
 class Args:
-    exp_name: Optional[str] = "So100"
+    exp_name: Optional[str] = None
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
