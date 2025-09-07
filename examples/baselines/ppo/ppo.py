@@ -13,6 +13,7 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import GradScaler, autocast
 
 # ManiSkill specific imports
 import mani_skill.envs
@@ -31,12 +32,18 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=True`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+    compile: bool = False
+    """if toggled, will use `torch.compile` to compile the model (requires PyTorch 2.0+), May lead to extra VRAM usage."""
+    amp: bool = False
+    """if toggled, cuda automatic mixed precision (AMP) will be enabled for training (reccomended for newer GPUs with less VRAM)"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "ManiSkill"
     """the wandb's project name"""
     wandb_entity: Optional[str] = None
     """the entity (team) of wandb's project"""
+    shader: str = "minimal"
+    """shader type to use for rendering, (minimal | default | rt | rt-fast)"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = True
@@ -49,6 +56,10 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "PickCube-v1"
     """the id of the environment"""
+    robot_id: str = "panda"
+    """the robot to use in the environment, separated by comma"""
+    sim_backend: str = "physx_cuda"
+    """the type of environment vectorization to use (physx_cuda:n | physx_cpu)"""
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
@@ -102,6 +113,9 @@ class Args:
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
     finite_horizon_gae: bool = False
+    """if toggled, will use the finite-horizon GAE described in https://arxiv.org/abs/2305.16281"""
+    shared_backbone: bool = True
+    """if toggled, will use a shared backbone for the actor and critic instead of separate backbones"""
 
 
     # to be filled in runtime
@@ -117,48 +131,90 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -20
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, shared_backbone=True):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 1)),
-        )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01*np.sqrt(2)),
-        )
-        self.actor_logstd = nn.Parameter(torch.ones(1, np.prod(envs.single_action_space.shape)) * -0.5)
+        self.shared_backbone = shared_backbone
+
+        # Helper function to create the backbone network to avoid code duplication
+        def _make_backbone():
+            return nn.Sequential(
+                layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+                nn.Tanh(), # Consider inplace=True for memory savings
+                layer_init(nn.Linear(256, 256)),
+                nn.Tanh(),
+                layer_init(nn.Linear(256, 256)),
+                nn.Tanh(),
+            )
+
+        if self.shared_backbone:
+            # --- Shared Backbone Path ---
+            # One backbone, three separate heads
+            self.backbone = _make_backbone()
+            self.critic_head = layer_init(nn.Linear(256, 1), std=1.0)
+            self.actor_mean_head = layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01)
+            self.actor_logstd_head = layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01)
+        else:
+            # --- Disentangled Path ---
+            # Two separate backbones and their corresponding heads
+            self.actor_backbone = _make_backbone()
+            self.critic_backbone = _make_backbone()
+            
+            self.critic_head = layer_init(nn.Linear(256, 1), std=1.0)
+            self.actor_mean_head = layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01)
+            self.actor_logstd_head = layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01)
 
     def get_value(self, x):
-        return self.critic(x)
+        if self.shared_backbone:
+            features = self.backbone(x)
+        else:
+            features = self.critic_backbone(x)
+        return self.critic_head(features)
+
+    def get_action_and_value(self, x, action=None):
+        if self.shared_backbone:
+            # --- Shared Path: One forward pass for features ---
+            features = self.backbone(x)
+            actor_features = features
+            critic_features = features
+        else:
+            # --- Disentangled Path: Two separate forward passes ---
+            actor_features = self.actor_backbone(x)
+            critic_features = self.critic_backbone(x)
+
+        # Actor logic (uses actor_features)
+        action_mean = self.actor_mean_head(actor_features)
+        action_logstd = self.actor_logstd_head(actor_features)
+        action_logstd = torch.clamp(action_logstd, LOG_STD_MIN, LOG_STD_MAX)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        
+        if action is None:
+            action = probs.sample()
+            
+        # Critic logic (uses critic_features)
+        value = self.critic_head(critic_features)
+        
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), value
+
     def get_action(self, x, deterministic=False):
-        action_mean = self.actor_mean(x)
+        if self.shared_backbone:
+            actor_features = self.backbone(x)
+        else:
+            actor_features = self.actor_backbone(x)
+        
+        action_mean = self.actor_mean_head(actor_features)
         if deterministic:
             return action_mean
-        action_logstd = self.actor_logstd.expand_as(action_mean)
+        
+        action_logstd = self.actor_logstd_head(actor_features)
+        action_logstd = torch.clamp(action_logstd, LOG_STD_MIN, LOG_STD_MAX)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         return probs.sample()
-    def get_action_and_value(self, x, action=None):
-        action_mean = self.actor_mean(x)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 class Logger:
     def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
@@ -191,8 +247,15 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
+    use_amp = args.amp and device.type == "cuda"
+    use_fused_optimizer = device.type == "cuda"
+    print(f"Automatic Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled'}")
+    print(f"Fused Optimizer: {'Enabled' if use_fused_optimizer else 'Disabled'}")
+
+    scaler = GradScaler(enabled=use_amp)
+
     # env setup
-    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cuda")
+    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, robot_uids=args.robot_id, human_render_camera_configs=dict(shader_pack=args.shader))
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
@@ -241,8 +304,17 @@ if __name__ == "__main__":
     else:
         print("Running evaluation")
 
-    agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    agent = Agent(envs, shared_backbone=args.shared_backbone).to(device)
+    if args.compile and torch.__version__ >= "2.0.0":
+        try:
+            print("Compiling model with torch.compile...")
+            agent = torch.compile(agent)
+            print("Model compiled successfully.")
+        except Exception as e:
+            print(f"Failed to compile the model: {e}")
+            print("Continuing without compilation.")
+    
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5, fused=use_fused_optimizer)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -391,51 +463,53 @@ if __name__ == "__main__":
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
+                with autocast(enabled=use_amp):
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                    logratio = newlogprob - b_logprobs[mb_inds]
+                    ratio = logratio.exp()
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
+                    with torch.no_grad():
+                        # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                        old_approx_kl = (-logratio).mean()
+                        approx_kl = ((ratio - 1) - logratio).mean()
+                        clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                    if args.target_kl is not None and approx_kl > args.target_kl:
+                        break
 
-                if args.target_kl is not None and approx_kl > args.target_kl:
-                    break
+                    mb_advantages = b_advantages[mb_inds]
+                    if args.norm_adv:
+                        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-                mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    # Policy loss
+                    pg_loss1 = -mb_advantages * ratio
+                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                    # Value loss
+                    newvalue = newvalue.view(-1)
+                    if args.clip_vloss:
+                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                        v_clipped = b_values[mb_inds] + torch.clamp(
+                            newvalue - b_values[mb_inds],
+                            -args.clip_coef,
+                            args.clip_coef,
+                        )
+                        v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                        v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                        v_loss = 0.5 * v_loss_max.mean()
+                    else:
+                        v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                    entropy_loss = entropy.mean()
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break

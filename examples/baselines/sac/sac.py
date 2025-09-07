@@ -38,6 +38,8 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     compile: bool = False
     """if toggled, will use `torch.compile` to compile the model (requires PyTorch 2.0+), May lead to extra VRAM usage."""
+    amp: bool = False
+    """if toggled, cuda automatic mixed precision (AMP) will be enabled for training (reccomended for newer GPUs with less VRAM)"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "ManiSkill"
@@ -126,8 +128,6 @@ class Args:
     """whether to let parallel environments reset upon termination instead of truncation"""
     bootstrap_at_done: str = "always"
     """the bootstrap method to use when a done signal is received. Can be 'always' or 'never'"""
-    amp: bool = False
-    """if toggled, cuda automatic mixed precision (AMP) will be enabled for training (reccomended for newer GPUs with less VRAM)"""
 
     # to be filled in runtime
     grad_steps_per_iteration: int = 0
