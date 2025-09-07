@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 import tqdm
+from torch.cuda.amp import GradScaler, autocast
 
 from mani_skill.utils import gym_utils
 from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
@@ -35,6 +36,8 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+    compile: bool = False
+    """if toggled, will use `torch.compile` to compile the model (requires PyTorch 2.0+), May lead to extra VRAM usage."""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "ManiSkill"
@@ -43,6 +46,8 @@ class Args:
     """the entity (team) of wandb's project"""
     wandb_group: str = "SAC"
     """the group of the run for wandb"""
+    shader: str = "minimal"
+    """shader type to use for rendering, (minimal | default | rt | rt-fast)"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_trajectory: bool = True
@@ -59,13 +64,13 @@ class Args:
     # Environment specific arguments
     env_id: str = "PickCube-v1"
     """the id of the environment"""
-    robot: str = "so100"
+    robot: str = "panda"
     """the robot to use in the environment. If None, use the default robot of the environment (panda | so100)"""
-    env_vectorization: str = "gpu"
-    """the type of environment vectorization to use (gpu | cpu)"""
-    num_envs: int = 4
+    sim_backend: str = "physx_cuda:0"
+    """the type of environment vectorization to use (physx_cuda:n | physx_cpu)"""
+    num_envs: int = 64
     """the number of parallel environments"""
-    num_eval_envs: int = 4
+    num_eval_envs: int = 16
     """the number of parallel evaluation environments"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -91,15 +96,15 @@ class Args:
     """total timesteps of the experiments"""
     buffer_size: int = 1_000_000
     """the replay memory buffer size"""
-    buffer_device: str = "cpu"
-    """where the replay buffer is stored. Can be 'cpu' or 'cuda' for GPU"""
+    buffer_device: str = "cuda:0"
+    """where the replay buffer is stored. Can be 'cpu' or 'cuda:n' for GPU"""
     gamma: float = 0.8
     """the discount factor gamma"""
     tau: float = 0.01
     """target smoothing coefficient"""
     batch_size: int = 1024
     """the batch size of sample from the replay memory"""
-    learning_starts: int = 4_000
+    learning_starts: int = 100_000
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -110,7 +115,7 @@ class Args:
     target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
     """the frequency of updates for the target nerworks"""
     alpha: float = 0.2
-    """Entropy regularization coefficient."""
+    """Entropy regularization coefficient (works if autotune is False)."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
     training_freq: int = 64
@@ -121,6 +126,8 @@ class Args:
     """whether to let parallel environments reset upon termination instead of truncation"""
     bootstrap_at_done: str = "always"
     """the bootstrap method to use when a done signal is received. Can be 'always' or 'never'"""
+    amp: bool = False
+    """if toggled, cuda automatic mixed precision (AMP) will be enabled for training (reccomended for newer GPUs with less VRAM)"""
 
     # to be filled in runtime
     grad_steps_per_iteration: int = 0
@@ -147,10 +154,10 @@ class ReplayBuffer:
         self.obs = torch.zeros((self.per_env_buffer_size, self.num_envs) + env.single_observation_space.shape).to(storage_device)
         self.next_obs = torch.zeros((self.per_env_buffer_size, self.num_envs) + env.single_observation_space.shape).to(storage_device)
         self.actions = torch.zeros((self.per_env_buffer_size, self.num_envs) + env.single_action_space.shape).to(storage_device)
-        self.logprobs = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device)
+        # self.logprobs = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device) # not being used
         self.rewards = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device)
         self.dones = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device)
-        self.values = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device)
+        # self.values = torch.zeros((self.per_env_buffer_size, self.num_envs)).to(storage_device) # not being used
 
     def add(self, obs: torch.Tensor, next_obs: torch.Tensor, action: torch.Tensor, reward: torch.Tensor, done: torch.Tensor):
         if self.storage_device == torch.device("cpu"):
@@ -191,11 +198,11 @@ class SoftQNetwork(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 1),
         )
 
@@ -213,11 +220,11 @@ class Actor(nn.Module):
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
         self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
@@ -291,26 +298,18 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    print("Device : ", device)
 
-    ####### Environment setup #######
-    if args.robot is None:
-        env_kwargs = dict(
-            obs_mode="state",
-            render_mode="rgb_array",
-            sim_backend=args.env_vectorization,
-        )
-    else:
-        env_kwargs = dict(
-            obs_mode="state",
-            render_mode="rgb_array",
-            sim_backend="gpu",
-            robot_uids=args.robot,
-        )
-    # env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="gpu")
+    use_amp = args.amp and device.type == "cuda"
+    use_fused_optimizer = device.type == "cuda"
+    print(f"Automatic Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled'}")
+    print(f"Fused Optimizer: {'Enabled' if use_fused_optimizer else 'Disabled'}")
+
+    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, robot_uids=args.robot, human_render_camera_configs=dict(shader_pack=args.shader))
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
-    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, human_render_camera_configs=dict(shader_pack="minimal"), **env_kwargs)
-    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="minimal"), **env_kwargs)
+    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
+    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq,  **env_kwargs)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
@@ -360,6 +359,18 @@ if __name__ == "__main__":
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
     qf2 = SoftQNetwork(envs).to(device)
+
+    if torch.__version__ >= "2.0.0" and args.compile:
+        try :
+            print("Compiling models with torch.compile...")
+            actor = torch.compile(actor)
+            qf1 = torch.compile(qf1)
+            qf2 = torch.compile(qf2)
+            print("Models compiled successfully.")
+        except Exception as e:
+            print(f"Failed to compile the models: {e}")
+            print("Continuing without compilation.")
+
     qf1_target = SoftQNetwork(envs).to(device)
     qf2_target = SoftQNetwork(envs).to(device)
     if args.checkpoint is not None:
@@ -369,15 +380,15 @@ if __name__ == "__main__":
         qf2.load_state_dict(ckpt['qf2'])
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
-    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
+    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr, fused=use_fused_optimizer)
+    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr, fused=use_fused_optimizer)
 
     # Automatic entropy tuning
     if args.autotune:
         target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
         log_alpha = torch.zeros(1, requires_grad=True, device=device)
         alpha = log_alpha.exp().item()
-        a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
+        a_optimizer = optim.Adam([log_alpha], lr=args.q_lr, fused=use_fused_optimizer)
     else:
         alpha = args.alpha
 
@@ -389,6 +400,8 @@ if __name__ == "__main__":
         storage_device=torch.device(args.buffer_device),
         sample_device=device
     )
+
+    scaler = GradScaler(enabled=use_amp)
 
 
     # TRY NOT TO MODIFY: start the game
@@ -455,8 +468,9 @@ if __name__ == "__main__":
             if not learning_has_started:
                 actions = torch.tensor(envs.action_space.sample(), dtype=torch.float32, device=device)
             else:
-                actions, _, _ = actor.get_action(obs)
-                actions = actions.detach()
+                with torch.no_grad():
+                    actions, _, _ = actor.get_action(obs)
+                # actions = actions.detach() # no need bcause of torch.no_grad()
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, rewards, terminations, truncations, infos = envs.step(actions)
@@ -497,35 +511,37 @@ if __name__ == "__main__":
             data = rb.sample(args.batch_size)
 
             # update the value networks
-            with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_obs)
-                qf1_next_target = qf1_target(data.next_obs, next_state_actions)
-                qf2_next_target = qf2_target(data.next_obs, next_state_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
-                # data.dones is "stop_bootstrap", which is computed earlier according to args.bootstrap_at_done
+            with autocast(enabled=use_amp):
+                with torch.no_grad():
+                    next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_obs)
+                    qf1_next_target = qf1_target(data.next_obs, next_state_actions)
+                    qf2_next_target = qf2_target(data.next_obs, next_state_actions)
+                    min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
+                    next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
+                    # data.dones is "stop_bootstrap", which is computed earlier according to args.bootstrap_at_done
 
-            qf1_a_values = qf1(data.obs, data.actions).view(-1)
-            qf2_a_values = qf2(data.obs, data.actions).view(-1)
-            qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            qf_loss = qf1_loss + qf2_loss
+                qf1_a_values = qf1(data.obs, data.actions).view(-1)
+                qf2_a_values = qf2(data.obs, data.actions).view(-1)
+                qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
+                qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+                qf_loss = qf1_loss + qf2_loss
 
             q_optimizer.zero_grad()
-            qf_loss.backward()
-            q_optimizer.step()
+            scaler.scale(qf_loss).backward()
+            scaler.step(q_optimizer)
 
             # update the policy network
             if global_update % args.policy_frequency == 0:  # TD 3 Delayed update support
-                pi, log_pi, _ = actor.get_action(data.obs)
-                qf1_pi = qf1(data.obs, pi)
-                qf2_pi = qf2(data.obs, pi)
-                min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+                with autocast(enabled=use_amp):
+                    pi, log_pi, _ = actor.get_action(data.obs)
+                    qf1_pi = qf1(data.obs, pi)
+                    qf2_pi = qf2(data.obs, pi)
+                    min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                    actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
                 actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_optimizer.step()
+                scaler.scale(actor_loss).backward()
+                scaler.step(actor_optimizer)
 
                 if args.autotune:
                     with torch.no_grad():
@@ -537,9 +553,11 @@ if __name__ == "__main__":
                     # log_alpha has a legacy reason: https://github.com/rail-berkeley/softlearning/issues/136#issuecomment-619535356
 
                     a_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    a_optimizer.step()
+                    scaler.scale(alpha_loss).backward()
+                    scaler.step(a_optimizer)
                     alpha = log_alpha.exp().item()
+
+            scaler.update()
 
             # update the target networks
             if global_update % args.target_network_frequency == 0:
