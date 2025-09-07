@@ -177,10 +177,13 @@ class PickCubeEnv(BaseEnv):
         reward += place_reward * is_grasped
 
         qvel = self.agent.robot.get_qvel()
+        # this is to incorporate the fact that both the finger tips move in these grippers
         if self.robot_uids in ["panda", "widowxai"]:
             qvel = qvel[..., :-2]
+        # this is to incorporate the fact that there is one moving part in these type of manipulators
         elif self.robot_uids == "so100":
             qvel = qvel[..., :-1]
+        # we want the gripper to be static after grasp
         static_reward = 1 - torch.tanh(5 * torch.linalg.norm(qvel, axis=1))
         reward += static_reward * info["is_obj_placed"]
 
